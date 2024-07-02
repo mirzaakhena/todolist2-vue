@@ -1,0 +1,330 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  # DynamoDB Table
+  TodoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "TodoTable"
+      AttributeDefinitions:
+        - AttributeName: "id"
+          AttributeType: "S"
+        - AttributeName: "createdDate"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "id"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      GlobalSecondaryIndexes:
+        - IndexName: "CreatedDateIndex"
+          KeySchema:
+            - AttributeName: "createdDate"
+              KeyType: "HASH"
+          Projection:
+            ProjectionType: "ALL"
+          ProvisionedThroughput:
+            ReadCapacityUnits: 5
+            WriteCapacityUnits: 5
+
+  # AppSync GraphQL API
+  AppSyncApi:
+    Type: AWS::AppSync::GraphQLApi
+    Properties:
+      Name: "TodoAppAPI"
+      AuthenticationType: API_KEY
+
+  ApiKey:
+    Type: AWS::AppSync::ApiKey
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+
+  GraphQLSchema:
+    Type: AWS::AppSync::GraphQLSchema
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      Definition: |
+        type Todo {
+          id: ID
+          title: String
+          completed: Boolean
+          randomId: String
+          createdDate: AWSDateTime
+        }
+        type Query {
+          getTodos: [Todo]
+        }
+        type Mutation {
+          addTodo(title: String!, randomId: String!): Todo
+          updateTodo(id: ID!, completed: Boolean!, randomId: String!): Todo
+          deleteTodo(id: ID!, randomId: String!): Todo
+        }
+        type Subscription {
+          onTodoChanged: Todo
+            @aws_subscribe(mutations: ["addTodo", "updateTodo", "deleteTodo"])
+        }
+        schema {
+          query: Query
+          mutation: Mutation
+          subscription: Subscription
+        }
+
+  TodoTableDataSource:
+    Type: AWS::AppSync::DataSource
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      Name: "TodoTableDataSource"
+      Type: "AMAZON_DYNAMODB"
+      DynamoDBConfig:
+        AwsRegion: !Ref "AWS::Region"
+        TableName: !Ref TodoTable
+      ServiceRoleArn: !GetAtt AppSyncServiceRole.Arn
+
+  # IAM Role for AppSync
+  AppSyncServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "appsync.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "AppSyncDynamoDBAccess"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "dynamodb:PutItem"
+                  - "dynamodb:Scan"
+                  - "dynamodb:UpdateItem"
+                  - "dynamodb:DeleteItem"
+                Resource: !GetAtt TodoTable.Arn
+
+  # AppSync Resolvers
+  GetTodosResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      TypeName: "Query"
+      FieldName: "getTodos"
+      DataSourceName: !GetAtt TodoTableDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "Scan"
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result.items)
+
+  AddTodoResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      TypeName: "Mutation"
+      FieldName: "addTodo"
+      DataSourceName: !GetAtt TodoTableDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "PutItem",
+          "key": {
+            "id": { "S": "$util.autoId()" }
+          },
+          "attributeValues": {
+            "title": $util.dynamodb.toDynamoDBJson($ctx.arguments.title),
+            "completed": { "BOOL": false },
+            "createdDate": $util.dynamodb.toDynamoDBJson($util.time.nowISO8601()),
+            "randomId": $util.dynamodb.toDynamoDBJson($ctx.arguments.randomId)
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  UpdateTodoResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      TypeName: "Mutation"
+      FieldName: "updateTodo"
+      DataSourceName: !GetAtt TodoTableDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "UpdateItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.arguments.id)
+          },
+          "update": {
+            "expression": "SET completed = :completed, randomId = :randomId",
+            "expressionValues": {
+              ":completed": $util.dynamodb.toDynamoDBJson($ctx.arguments.completed),
+              ":randomId": $util.dynamodb.toDynamoDBJson($ctx.arguments.randomId)
+            }
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  UpdateTodoFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      Name: "UpdateTodoFunction"
+      DataSourceName: !GetAtt TodoTableDataSource.Name
+      FunctionVersion: "2018-05-29"
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "UpdateItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.arguments.id)
+          },
+          "update": {
+            "expression": "SET randomId = :randomId",
+            "expressionValues": {
+              ":randomId": $util.dynamodb.toDynamoDBJson($ctx.arguments.randomId)
+            }
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  DeleteTodoFunction:
+    Type: AWS::AppSync::FunctionConfiguration
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      Name: "DeleteTodoFunction"
+      DataSourceName: !GetAtt TodoTableDataSource.Name
+      FunctionVersion: "2018-05-29"
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "DeleteItem",
+          "key": {
+            "id": $util.dynamodb.toDynamoDBJson($ctx.arguments.id)
+          },
+          "condition": {
+            "expression": "attribute_exists(id)"
+          }
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  DeleteTodoResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      TypeName: "Mutation"
+      FieldName: "deleteTodo"
+      Kind: PIPELINE
+      PipelineConfig:
+        Functions:
+          - !GetAtt UpdateTodoFunction.FunctionId
+          - !GetAtt DeleteTodoFunction.FunctionId
+      RequestMappingTemplate: |
+        {}
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result)
+
+  OnTodoChangedResolver:
+    Type: AWS::AppSync::Resolver
+    Properties:
+      ApiId: !GetAtt AppSyncApi.ApiId
+      TypeName: "Subscription"
+      FieldName: "onTodoChanged"
+      DataSourceName: !GetAtt TodoTableDataSource.Name
+      RequestMappingTemplate: |
+        {
+          "version": "2017-02-28",
+          "operation": "Scan"
+        }
+      ResponseMappingTemplate: |
+        $util.toJson($ctx.result.items)
+
+  # IAM Role for Amplify
+  AmplifyServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: "amplify.amazonaws.com"
+            Action: "sts:AssumeRole"
+      Policies:
+        - PolicyName: "AmplifyAccess"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - "codecommit:GitPull"
+                Resource: "*"
+
+  # Amplify App
+  AmplifyApp:
+    Type: AWS::Amplify::App
+    Properties:
+      Name: todolist-vue
+      Repository: https://git-codecommit.us-east-1.amazonaws.com/v1/repos/todolist2-vue
+      # OauthToken: YOUR_OAUTH_TOKEN
+      IAMServiceRole: !GetAtt AmplifyServiceRole.Arn
+      Platform: WEB
+      EnableBranchAutoDeletion: true
+      EnvironmentVariables:
+        - Name: NODE_ENV
+          Value: development
+      BuildSpec: |
+        version: 1
+        applications:
+          - frontend:
+              phases:
+                preBuild:
+                  commands:
+                    - npm ci --cache .npm --prefer-offline
+                build:
+                  commands:
+                    - npm run build
+              artifacts:
+                baseDirectory: dist
+                files:
+                  - '**/*'
+              cache:
+                paths:
+                  - .npm/**/*
+
+  TodolistVueBranch:
+    Type: AWS::Amplify::Branch
+    Properties:
+      AppId: !GetAtt AmplifyApp.AppId
+      BranchName: master
+      EnableAutoBuild: true
+      Framework: "Vue"
+      Stage: "PRODUCTION"
+      EnvironmentVariables:
+        - Name: NODE_ENV
+          Value: "production"
+
+Outputs:
+  ApiId:
+    Description: "AppSync API ID"
+    Value: !GetAtt AppSyncApi.ApiId
+    Export:
+      Name: "AppSyncApiId"
+
+  ApiKey:
+    Description: "AppSync API Key"
+    Value: !GetAtt ApiKey.ApiKey
+    Export:
+      Name: "AppSyncApiKey"
+
+  GraphQLUrl:
+    Description: "AppSync GraphQL URL"
+    Value: !GetAtt AppSyncApi.GraphQLUrl
+    Export:
+      Name: "AppSyncGraphQLUrl"

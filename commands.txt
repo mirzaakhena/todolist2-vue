@@ -1,0 +1,20 @@
+aws cloudformation create-stack --stack-name TodoAppStack --template-body file://cloud_formation.yml --capabilities CAPABILITY_IAM
+aws cloudformation update-stack --stack-name TodoAppStack --template-body file://cloud_formation.yml --capabilities CAPABILITY_IAM
+aws cloudformation delete-stack --stack-name TodoAppStack
+aws cloudformation describe-stacks --stack-name TodoAppStack
+aws cloudformation validate-template --template-body file://cloud_formation.yml
+
+https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGquide/aws-resource-amplify-app.html
+
+{
+	"Version": "2012-10-17",
+	"Statement": [
+		{
+			"Action": [
+				"codecommit:GitPull"
+			],
+			"Resource": "*",
+			"Effect": "Allow"
+		}
+	]
+}
